@@ -1,13 +1,15 @@
 /*
 Command sudokami solves sudoku puzzles through concurrent deduction.
 
-It launches a goroutine for each cell in the puzzle to listen on a channel for deductions made by the cells adjacent to it
-in the same row, column, or 3x3 box. When a cell deduces the digit it must contain, it sends this digit on the channels
-of the adjacent cells. In this way, command sudokami can solve any puzzle that depends only on sole candidate inference.
+It launches a goroutine for each candidate inference in the puzzle to listen on a channel for deductions made by
+the inferences in the same cell or of the same digit in the same row, column, or 3x3 box (with which it is mutually exclusive).
+When a candidate deduces its necessity or falsehood, it informs the candidates adjacent to it or the groups it belongs to, respectively.
+When a group determines that exactly one of its candidates can be true, it informs its candidates.
+In this way, command sudokami can solve any puzzle that depends only on single candidate inference patterns.
 
 Usage:
 Pass the puzzle as a string argument on the command line:
-	go run sudokami.go "3.542.81.4879.15.6.29.5637485.793.416132.8957.74.6528.2413.9.655.867.192.965124.8"
+	go run sudokami.go "..2.3...8.....8....31.2.....6..5.27..1.....5.2.4.6..31....8.6.5.......13..531.4.."
 
 The digits 1-9 represent clues, and 0 or . denote empty cells. All other characters are ignored.
 */
@@ -38,129 +40,190 @@ func main() {
 	}
 
 	var wg sync.WaitGroup
-	g := NewGrid(s, &wg)
+	g := NewGrid(&wg)
+	for i, n := range s {
+		if n != 0 {
+			g.Clue(i/9, i%9, n-1)
+		}
+	}
 	wg.Wait()
 	fmt.Println(g)
 }
 
-// Cell is a cell in a sudoku puzzle.
-type Cell struct {
-	// can holds the candidate digits that the Cell might contain.
-	can map[int]struct{}
+// Candidate is an inference regarding a single candidate digit in a single cell.
+type Candidate struct {
+	// ch is used to receive information about the Candidate deduced by its Groups and adjacent Candidates.
+	ch chan bool
 
-	// ch is used to receive digits that the Cell cannot contain.
-	ch chan int
+	// ach holds the channels of adjacent Candidates.
+	ach []chan bool
 
-	// adj is a list of channels on which to send the digit the Cell contains, when that digit is deduced.
-	adj []chan int
+	// gch holds the channels of the Groups the Candidate belongs to.
+	gch []chan bool
+
+	// b records whether the Candidate has determined that it is true.
+	b bool
 }
 
-// String returns a string representation of c.
-func (c *Cell) String() string {
-	if len(c.can) == 1 {
-		for n := range c.can {
-			return strconv.Itoa(n)
-		}
-	}
-	return "."
-}
+// NewCandidate creates a new Candidate, launches a goroutine for it to receive and send values, and returns a pointer to it.
+func NewCandidate(wg *sync.WaitGroup) *Candidate {
+	// nAdj is the number of adjacent Candidates.
+	// A Candidate shares its cell with m^2-1 other digits,
+	// its row with m^2-1 occurrences of the same digit in different columns,
+	// and its column with m^2-1 occurrences of the same digit in different rows.
+	// Besides these, there are (m-1)^2 other occurrences of the same digit in a different row and column of the same box.
+	const nAdj = 3*(m*m-1) + (m-1)*(m-1)
 
-// NewCell creates a new Cell, launches a goroutine for it to receive and send values, and returns a pointer to it.
-func NewCell(wg *sync.WaitGroup) *Cell {
-	// nAdj is the number of Cells adjacent to any Cell.
-	// A Cell shares its box with m^2-1 others. Besides these, there are m(m-1) other Cells in its row, and m(m-1) others in its column.
-	const nAdj = m*m - 1 + 2*m*(m-1)
+	// nGroup is the number of Groups a Candidate belongs to.
+	// Each Candidate belongs to a unique combination of one row, one column, and one digit.
+	// In addition, each Candidate belongs to one box.
+	const nGroup = 4
 
-	c := &Cell{
-		can: make(map[int]struct{}),
-		ch:  make(chan int, nAdj), // Buffer ch with enough capacity to receive one value from each adjacent Cell
-		adj: make([]chan int, 0, nAdj),
-	}
-	for n := 1; n <= d; n++ {
-		c.can[n] = struct{}{}
+	c := &Candidate{
+		// Buffer ch with enough capacity to receive one value from NewGrid and one from
+		// each Group and adjacent Candidate so that channel operations will never block.
+		ch:  make(chan bool, nAdj+nGroup+1),
+		ach: make([]chan bool, 0, nAdj),
+		gch: make([]chan bool, 0, nGroup),
 	}
 
-	// Receive values over ch and update can. When there is only one remaining candidate,
-	// announce that value to all adjacent Cells, then call wg.Done and return.
-	// Since the number of values each goroutine might receive from those adjacent to it is known,
-	// and each channel is buffered to sufficient capacity, the goroutine can return after sending
-	// without consuming the rest of the values sent to it.
+	// Listen on ch. The first value received indicates the truth value of c's inference.
+	// If true is received, send false to all adjacent Candidates; if false is received, inform the Groups.
+	// In either case, call wg.Done and consume all remaining sends on ch without action.
 	wg.Add(1)
 	go func() {
-		for len(c.can) > 1 {
-			delete(c.can, <-c.ch)
-		}
-		for n := range c.can {
-			for _, ch := range c.adj {
-				ch <- n
+		switch c.b = <-c.ch; c.b {
+		case true:
+			for _, a := range c.ach {
+				a <- false
+			}
+		case false:
+			for _, g := range c.gch {
+				g <- false
 			}
 		}
 		wg.Done()
+		for {
+			<-c.ch
+		}
 	}()
 
 	return c
 }
 
-// Grid is a collection of Cells comprising a puzzle.
-type Grid struct{ cs []*Cell }
+// Group supervises all of the Candidates in a single cell,
+// or all of the Candidates of a single digit in a single row, column, or box.
+type Group struct {
+	// ch is used to receive the deductions of the Group's Candidates.
+	ch chan bool
 
-// NewGrid creates a new Grid, populates its Cells according to s, and returns a pointer to it.
-func NewGrid(digits []int, wg *sync.WaitGroup) *Grid {
-	g := &Grid{cs: make([]*Cell, d*d)}
+	// cch holds the channels of the Group's Cardidates
+	cch []chan bool
+
+	// n is the number of Candidate inferences that have not been determined to be false.
+	n int
+}
+
+// NewGroup creates a new Group, launches a goroutine for it to receive and send values, and returns a pointer to it.
+func NewGroup() *Group {
+	// nCan is the number of Candidates in a Group.
+	const nCan = d
+
+	g := &Group{
+		// Each of g's Candidates will send one value when it determines that it is false.
+		ch:  make(chan bool, nCan-1),
+		cch: make([]chan bool, 0, nCan),
+		n:   nCan,
+	}
+
+	// Listen on ch. When a Candidate indicates that it is false, decrement n.
+	// When n reaches 1, g has received complete information: send true to all Candidates and return.
+	go func() {
+		for g.n > 1 {
+			<-g.ch
+			g.n--
+		}
+		for _, c := range g.cch {
+			c <- true
+		}
+	}()
+
+	return g
+}
+
+// Grid is a collection of Candidates comprising a puzzle, and the Groups they belong to.
+type Grid struct {
+	cs []*Candidate
+	gs []*Group
+}
+
+// NewGrid creates a new Grid, creates and connects its Candidates and Groups, and returns a pointer to it.
+func NewGrid(wg *sync.WaitGroup) *Grid {
+	g := &Grid{
+		cs: make([]*Candidate, d*d*d), // row * d^2 + column * d + digit
+		gs: make([]*Group, 4*d*d),     // row-column, row-digit, column-digit, box-digit
+	}
 	for i := range g.cs {
-		g.cs[i] = NewCell(wg)
+		g.cs[i] = NewCandidate(wg)
+	}
+	for i := range g.gs {
+		g.gs[i] = NewGroup()
 	}
 	for i, ci := range g.cs {
+		connect := func(gr *Group) {
+			ci.gch = append(ci.gch, gr.ch)
+			gr.cch = append(gr.cch, ci.ch)
+		}
+		connect(g.gs[0*d*d+row(i)*d+col(i)])
+		connect(g.gs[1*d*d+row(i)*d+dig(i)])
+		connect(g.gs[2*d*d+col(i)*d+dig(i)])
+		connect(g.gs[3*d*d+box(i)*d+dig(i)])
+
 		for j, cj := range g.cs {
 			if !isAdjacent(i, j) {
 				continue
 			}
 			// Add cj's channel to ci's list
-			ci.adj = append(ci.adj, cj.ch)
+			ci.ach = append(ci.ach, cj.ch)
 		}
 	}
 
-	for i, n := range digits {
-		if n == 0 {
-			continue
-		}
-		// Assign n to g.cs[i]
-		for not := 1; not <= d; not++ {
-			if not == n {
-				continue
-			}
-			g.cs[i].ch <- not
-		}
-	}
 	return g
 }
+
+// Clue records that the cell in the given row and column contains the given digit,
+// with all parameters in the range [0, 8].
+func (g *Grid) Clue(row, column, digit int) { g.cs[index(row, column, digit)].ch <- true }
 
 // String returns a string representation of g.
 func (g *Grid) String() string {
 	var s string
-	for i := 0; i < d; i++ {
-		for j := 0; j < d; j++ {
-			c := g.cs[d*i+j]
-			s += c.String()
+	for r := 0; r < d; r++ {
+		for c := 0; c < d; c++ {
+			var n, count int
+			for i := 0; i < d; i++ {
+				if g.cs[index(r, c, i)].b {
+					count++
+					n = i
+				}
+			}
+			if count == 1 {
+				s += strconv.Itoa(n + 1)
+			} else {
+				s += "."
+			}
 		}
 		s += "\n"
 	}
 	return s
 }
 
-// isAdjacent reports whether i and j index adjacent Cells.
-// Two cells are adjacent if they are in the same row, column, or box but are not identical.
-func isAdjacent(i, j int) bool {
-	return i != j && (row(i) == row(j) || col(i) == col(j) || box(i) == box(j))
-}
+// index returns a Candidate's index.
+func index(row, column, digit int) int { return row*d*d + column*d + digit }
 
-// row returns the row number of n.
-func row(n int) int { return n / d }
-
-// col returns the column number of n.
-func col(n int) int { return n % d }
-
-// box returns the box number of n.
+func row(n int) int { return n / (d * d) }
+func col(n int) int { return n / d % d }
+func dig(n int) int { return n % d }
 func box(n int) int {
 	//  0 | 1 | 2
 	// ---+---+---
@@ -168,6 +231,18 @@ func box(n int) int {
 	// ---+---+---
 	//  6 | 7 | 8
 	return row(n)/m*m + col(n)/m
+}
+
+// isAdjacent reports whether i and j index adjacent Candidates.
+// Candidates are adjacent if they are distinct and have the same row and column, row and digit, column and digit, or box and digit.
+func isAdjacent(i, j int) bool {
+	if i == j {
+		return false
+	}
+	if dig(i) != dig(j) {
+		return row(i) == row(j) && col(i) == col(j)
+	}
+	return row(i) == row(j) || col(i) == col(j) || box(i) == box(j)
 }
 
 // parseInput parses an input string.
