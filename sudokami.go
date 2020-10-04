@@ -92,7 +92,8 @@ func NewCandidate(wg *sync.WaitGroup) *Candidate {
 
 	// Listen on ch. The first value received indicates the truth value of c's inference.
 	// If true is received, send false to all adjacent Candidates; if false is received, inform the Groups.
-	// In either case, call wg.Done and consume all remaining sends on ch without action.
+	// In either case, call wg.Done and return: since ch is buffered to sufficient capacity,
+	// it is not necessary to consume the remaining values sent.
 	wg.Add(1)
 	go func() {
 		switch c.b = <-c.ch; c.b {
@@ -106,9 +107,6 @@ func NewCandidate(wg *sync.WaitGroup) *Candidate {
 			}
 		}
 		wg.Done()
-		for {
-			<-c.ch
-		}
 	}()
 
 	return c
