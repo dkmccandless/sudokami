@@ -53,15 +53,18 @@ func main() {
 // Candidate is an inference regarding a single candidate digit in a single cell.
 type Candidate struct {
 	// ch is used to receive information about the Candidate deduced by its Groups and adjacent Candidates.
+	// The first value the Candidate receives on ch informs it whether its inference is in the puzzle's solution.
 	ch chan bool
 
 	// ach holds the channels of adjacent Candidates.
+	// If the Candidate's inference is true, it sends false to all adjacent Candidates.
 	ach []chan bool
 
 	// gch holds the channels of the Groups the Candidate belongs to.
+	// If the Candidate's inference is false, it sends false to all of its Groups.
 	gch []chan bool
 
-	// b records whether the Candidate has determined that it is true.
+	// b records whether the Candidate has determined that its inference is true.
 	b bool
 }
 
@@ -112,12 +115,16 @@ func NewCandidate(wg *sync.WaitGroup) *Candidate {
 }
 
 // Group supervises all of the Candidates in a single cell,
-// or all of the Candidates of a single digit in a single row, column, or box.
+// or all of the Candidates of a single digit in a single row, column, or box,
+// precisely one of which is true in a puzzle's solution.
 type Group struct {
 	// ch is used to receive the deductions of the Group's Candidates.
+	// Each Candidate that determines that its inference is false sends false once on ch.
 	ch chan bool
 
-	// cch holds the channels of the Group's Cardidates
+	// cch holds the channels of the Group's Cardidates.
+	// When the Group has determined that only one of its Candidates can be true,
+	// it sends true to all of its Candidates.
 	cch []chan bool
 
 	// n is the number of Candidate inferences that have not been determined to be false.
