@@ -142,39 +142,48 @@ func NewGroup() *Group {
 
 // Grid is a collection of Candidates comprising a puzzle, and the Groups they belong to.
 type Grid struct {
-	cs []*Candidate
-	gs []*Group
+	cs [d][d][d]*Candidate
+	gs [nGroups][d][d]*Group
 }
 
 // NewGrid creates a new Grid, creates and connects its Candidates and Groups, and returns a pointer to it.
 func NewGrid(wg *sync.WaitGroup) *Grid {
-	g := &Grid{
-		cs: make([]*Candidate, d*d*d),   // row * d^2 + column * d + digit
-		gs: make([]*Group, nGroups*d*d), // row-column, row-digit, column-digit, box-digit
-	}
-	for i := range g.cs {
-		g.cs[i] = NewCandidate(wg)
-	}
-	for i := range g.gs {
-		g.gs[i] = NewGroup()
-	}
-	for i, ci := range g.cs {
-		connect := func(gr *Group) {
-			ci.groups = append(ci.groups, gr.ch)
-			gr.cans = append(gr.cans, ci.ch)
+	g := new(Grid)
+	for z := range g.gs {
+		for i := range g.gs[z] {
+			for j := range g.gs[z][i] {
+				g.gs[z][i][j] = NewGroup()
+			}
 		}
-		connect(g.gs[0*d*d+row(i)*d+col(i)])
-		connect(g.gs[1*d*d+row(i)*d+dig(i)])
-		connect(g.gs[2*d*d+col(i)*d+dig(i)])
-		connect(g.gs[3*d*d+box(i)*d+dig(i)])
 	}
-
+	for row := range g.cs {
+		for col := range g.cs[row] {
+			//  0 | 1 | 2
+			// ---+---+---
+			//  3 | 4 | 5
+			// ---+---+---
+			//  6 | 7 | 8
+			box := row/m*m + col/m
+			for dig := range g.cs[row][col] {
+				c := NewCandidate(wg)
+				g.cs[row][col][dig] = c
+				connect := func(gr *Group) {
+					c.groups = append(c.groups, gr.ch)
+					gr.cans = append(gr.cans, c.ch)
+				}
+				connect(g.gs[0][row][col]) // all Candidates in one cell
+				connect(g.gs[1][row][dig]) // all Candidates of one digit in one row
+				connect(g.gs[2][col][dig]) // all Candidates of one digit in one column
+				connect(g.gs[3][box][dig]) // all Candidates of one digit in one box
+			}
+		}
+	}
 	return g
 }
 
 // Clue records that the cell in the given row and column contains the given digit,
 // with all parameters in the range [0, d-1].
-func (g *Grid) Clue(row, column, digit int) { g.cs[index(row, column, digit)].ch <- true }
+func (g *Grid) Clue(row, column, digit int) { g.cs[row][column][digit].ch <- true }
 
 // String returns a string representation of g.
 func (g *Grid) String() string {
@@ -183,7 +192,7 @@ func (g *Grid) String() string {
 		for c := 0; c < d; c++ {
 			var n, count int
 			for i := 0; i < d; i++ {
-				if g.cs[index(r, c, i)].value {
+				if g.cs[r][c][i].value {
 					count++
 					n = i
 				}
@@ -204,21 +213,6 @@ func sendAll(chans []chan bool, b bool) {
 	for _, ch := range chans {
 		ch <- b
 	}
-}
-
-// index returns a Candidate's index.
-func index(row, column, digit int) int { return row*d*d + column*d + digit }
-
-func row(n int) int { return n / (d * d) }
-func col(n int) int { return n / d % d }
-func dig(n int) int { return n % d }
-func box(n int) int {
-	//  0 | 1 | 2
-	// ---+---+---
-	//  3 | 4 | 5
-	// ---+---+---
-	//  6 | 7 | 8
-	return row(n)/m*m + col(n)/m
 }
 
 // parseInput parses an input string.
