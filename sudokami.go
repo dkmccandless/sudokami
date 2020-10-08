@@ -73,7 +73,7 @@ type Candidate struct {
 // NewCandidate creates a new Candidate, launches a goroutine for it to receive and send values, and returns a pointer to it.
 func NewCandidate(wg *sync.WaitGroup) *Candidate {
 	c := &Candidate{
-		// ch will receive one value from each Group and possibly one value from NewGrid.
+		// ch will receive one value from each Group and possibly one value from Clue.
 		// Buffer it with sufficient capacity so that sends on it never block.
 		ch:     make(chan bool, nGroups+1),
 		groups: make([]chan bool, 0, nGroups),
@@ -104,9 +104,6 @@ type Group struct {
 	// When the Group determines the truth value of the Candidate(s) yet to report to it,
 	// it sends this value to all of its Candidates.
 	cans []chan bool
-
-	// n is the number of Candidate inferences that have not been determined to be false.
-	n int
 }
 
 // NewGroup creates a new Group, launches a goroutine for it to receive and send values, and returns a pointer to it.
@@ -119,7 +116,6 @@ func NewGroup() *Group {
 		// Buffer it with sufficient capacity so that sends on it never block.
 		ch:   make(chan bool, nCan),
 		cans: make([]chan bool, 0, nCan),
-		n:    nCan,
 	}
 
 	// Listen on ch. When a Candidate indicates that it is false, decrement n.
@@ -127,12 +123,11 @@ func NewGroup() *Group {
 	// 1. If a Candidate indicates that it is true, all others must be false: send false to all Candidates and return.
 	// 2. If n reaches 1, the remaining Candidate must be true: send true to all Candidates and return.
 	go func() {
-		for g.n > 1 {
+		for n := nCan; n > 1; n-- {
 			if <-g.ch {
 				sendAll(g.cans, false)
 				return
 			}
-			g.n--
 		}
 		sendAll(g.cans, true)
 	}()
